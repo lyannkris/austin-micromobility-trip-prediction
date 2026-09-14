@@ -1,0 +1,277 @@
+---
+title: "Final Project organized"
+output: pdf_document
+date: "2025-12-12"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Get Data
+
+```{r 1, echo=TRUE}
+trip_data <- read.csv("tripdata1.csv")
+trip_data2 <- read.csv("tripdata2.csv")
+combined_data <- rbind(trip_data, trip_data2)
+
+number_of_rows = nrow(combined_data)
+print(number_of_rows)
+
+
+#Comma removal
+library(dplyr)
+combined_data$Trip.Duration <- as.numeric(gsub(",", "", as.character(combined_data$Trip.Duration)))
+combined_data$Trip.Distance <- as.numeric(gsub(",", "", as.character(combined_data$Trip.Distance)))
+
+combined_data <- combined_data %>%
+  mutate(
+    Vehicle.Type = as.factor(Vehicle.Type),
+    Month = as.factor(Month),
+    Day.of.Week = as.factor(Day.of.Week),
+    Hour = as.factor(Hour),
+    Council.District..Start. = as.factor(Council.District..Start.)
+  )
+
+```
+
+# EDA
+
+```{r 2, echo=TRUE}
+
+#Check for null values
+sum(is.na(trip_data))
+
+#Filter columns of interest
+combined_data_filtered_cols = subset(combined_data, select = c(Trip.Duration, Trip.Distance, Vehicle.Type, Month, Hour, Day.of.Week, Council.District..Start. ))
+
+#Initial graphs: Trip Duration
+hist(log(combined_data_filtered_cols$Trip.Duration), xlab="Log(Trip Duration)", cex.lab = 1.5, main = "")
+hist(combined_data_filtered_cols$Trip.Duration, xlab="Trip Duration", cex.lab = 1.5, main = "")
+
+#Initial graphs: Trip Distance
+hist(log(combined_data_filtered_cols$Trip.Distance), xlab="Log(Trip Distance)", cex.lab = 1.5, main = "")
+hist(combined_data_filtered_cols$Trip.Distance, xlab="Trip Distance", cex.lab = 1.5, main = "")
+
+#Plot Trip duration vs distance
+plot(combined_data_filtered_cols$Trip.Distance,combined_data_filtered_cols$Trip.Duration, xlab = "Trip Distance", ylab="Trip Duration", cex.lab = 1.5)
+
+#boxplot for vehicle type
+boxplot(Trip.Duration ~ Vehicle.Type, data = combined_data_filtered_cols,
+        xlab = "Vehicle Type", ylab = "Trip Duration", cex.lab = 1.5)
+boxplot(Trip.Duration ~ Month, data = combined_data_filtered_cols,
+        xlab = "Month", ylab = "Trip Duration", cex.lab = 1.5)
+
+#dropping moped
+data_without_mopped <- combined_data_filtered_cols[combined_data_filtered_cols$Vehicle.Type != "moped",]
+combined_data_filtered_cols[combined_data_filtered_cols$Trip.Duration == "NA"]
+
+cleaned <- data_without_mopped[!apply(data_without_mopped == "None", 1, any), ]
+
+cleaned_sample <-cleaned
+
+#Re-index the rows
+rownames(cleaned_sample) <- NULL
+```
+
+# Baseline model
+
+```{r 3, echo=TRUE}
+
+#Separate data into training and testing
+set.seed(123)  # for reproducibility
+
+# number of cleaned samples
+n <- nrow(cleaned_sample)
+
+# Create a random sample of row indices for training 
+train_index <- sample(1:n, size = 0.7 * n)
+
+# Split the data
+train <- cleaned_sample[train_index, ]
+test  <- cleaned_sample[-train_index, ]
+
+baseline_model <- lm(Trip.Duration ~ ., data=train)
+summary(baseline_model)
+
+baseline_predictions <- predict(baseline_model,test)
+library(Metrics)
+print(rmse(test$Trip.Duration, baseline_predictions))
+```
+
+# Assumptions using Baseline model
+
+```{r 4, echo=TRUE}
+qqnorm(baseline_model$residuals, ylab="Residuals")
+qqline(baseline_model$residuals)
+hist(baseline_model$residuals, xlab="Residuals")
+
+plot(baseline_model$fitted, baseline_model$residual, xlab="Fitted", ylab="Residuals")
+abline(h=0)
+```
+# Transformed model
+
+```{r 5, echo=TRUE}
+#Remove Duration and Distance of 0 since they can cause errors
+train <- train[train$Trip.Duration > 0, ]
+train <- train[train$Trip.Distance > 0, ]
+test <- test[test$Trip.Duration > 0, ]
+test <- test[test$Trip.Distance> 0, ]
+rownames(train) <- NULL
+rownames(test) <- NULL
+transformed_model <- lm(log(Trip.Duration) ~ log(Trip.Distance) + Vehicle.Type  + Month + Council.District..Start. + Hour + Day.of.Week, data = train)
+summary(transformed_model)
+
+transformed_predictions <- predict(transformed_model,test)
+library(Metrics)
+print(rmse(test$Trip.Duration, transformed_predictions))
+```
+
+# Multicollinearity
+
+```{r 6, echo=TRUE}
+library(faraway)
+
+X <- model.matrix(transformed_model)[, -1]
+round(vif(X), 3)
+```
+
+# AIC to determine best model
+
+```{r 7, echo=TRUE}
+step(transformed_model)
+
+```
+
+# Outliers
+
+```{r 8, echo=TRUE}
+ti <- rstudent(transformed_model)
+tresult = 2*(1 - pt(abs(ti), df=nrow(train) - 6 - 1)) 
+indices <- which(tresult <= 0.05 / nrow(train))
+outliers <- train[indices,]
+
+write.csv(outliers, "outliers_transformed3.csv", row.names = TRUE)
+
+#Remove the implausible outliers
+suspicious_outliers <- c("44196","63281","75466","153972","181706","291168","291541",
+                         "309590","321431","322437","338441","360073","369943",
+                         "371323","373156","404244","471323","490903","504180",
+                         "515652","516475","538162","541523","576215","576621",
+                         "602588")
+
+outliers$speed_mps <- outliers$Trip.Distance / outliers$Trip.Duration
+implausible_outliers <- rownames(outliers)[outliers$speed_mps > 7]
+implausible_outliers_data <- subset(outliers, (rownames(outliers) %in% implausible_outliers))
+write.csv(implausible_outliers_data, "outliers_over_speed.csv", row.names = TRUE)
+
+outliers_without_implausible <- subset(outliers, !(rownames(outliers) %in% implausible_outliers))
+write.csv(outliers_without_implausible, "outliers_without_implausible2.csv", row.names = TRUE)
+
+#Remove the multi-day idle rentals (short distance with high duration)
+extreme_outliers <- rownames(outliers)[outliers$Trip.Duration > 86400]
+outliers_without_extreme <- subset(outliers_without_implausible, !(rownames(outliers_without_implausible ) %in% extreme_outliers))
+write.csv(outliers_without_extreme, "outliers_without_implausible3.csv", row.names = TRUE)
+
+
+#Remove the unsusual outliers since they don't seem plausible 
+suspicious_outliers <- rownames(outliers)[outliers$speed_mps < 0.05 & outliers$Trip.Duration > 300]
+outliers_without_suspicious <- subset(outliers_without_extreme, !(rownames(outliers_without_extreme) %in% suspicious_outliers))
+write.csv(outliers_without_suspicious, "outliers_without_3.csv", row.names = TRUE)
+
+#Remove outliers from train
+train <- train[!rownames(train) %in% implausible_outliers, ]
+train <- train[!rownames(train) %in% extreme_outliers, ]
+train <- train[!rownames(train) %in% suspicious_outliers, ]
+
+#Remove outliers from test with same thresholds
+rownames(train) <- NULL
+
+#Apply same thresholds to test data
+test2 <- test
+test$speed <- test$Trip.Distance/test$Trip.Duration
+test <- test[test$speed < 7,]
+test <- test[test$Trip.Duration < 86400,]
+test <- test[test$speed > 0.05 & test$Trip.Duration < 300,]
+rownames(test) <- NULL
+
+```
+
+# Influential points
+
+```{r 9, echo=TRUE}
+transformed_model_without_outliers <- lm(log(Trip.Duration) ~ log(Trip.Distance) + Vehicle.Type  + Month + Council.District..Start. + Hour + Day.of.Week, data = train)
+
+cook <- cooks.distance(transformed_model_without_outliers)
+library(faraway)
+par(xpd = TRUE)
+halfnorm(cook, ylab="Cook's Distance")
+
+#Check row names of those that appear to be influential
+influential = cook[cook > 0.004] 
+
+influential_ids <- c("95684", "132742", "220579", "387731", "446340", "527443")
+train_without_influential <- train[!rownames(train) %in% influential_ids, ]
+
+transformed_model_without_influential <-lm(log(Trip.Duration) ~ log(Trip.Distance) + Vehicle.Type  + Month + Council.District..Start. + Hour + Day.of.Week, data = train_without_influential)
+
+output <- capture.output(summary(transformed_model_without_influential))
+writeLines(output, "transformed_w_influential.txt")
+output <- capture.output(summary(transformed_model_without_outliers))
+writeLines(output, "transformed_w_outlier.txt")
+```
+
+#Assumptions
+
+```{r 10, echo=TRUE}
+transformed_model_without_outliers <- lm(log(Trip.Duration) ~ log(Trip.Distance) + Vehicle.Type  + Month + Council.District..Start. + Hour + Day.of.Week, data = train)
+
+qqnorm(transformed_model_without_outliers$residuals, ylab="Residuals")
+qqline(transformed_model_without_outliers$residuals)
+hist(transformed_model_without_outliers$residuals, xlab="Residuals")
+
+plot(transformed_model_without_outliers$fitted, transformed_model_without_outliers$residual, xlab="Fitted", ylab="Residuals")
+abline(h=0)
+```
+
+#Use Huber's method
+
+```{r 11, echo=TRUE}
+library(MASS)
+
+train2 <- train
+train2 <- droplevels(train2)
+sapply(train[c("Vehicle.Type","Month","Council.District..Start.","Hour","Day.of.Week")],
+       function(x) table(x)[table(x) == 0])
+
+huber <- rlm(log(Trip.Duration) ~ log(Trip.Distance) + Vehicle.Type  + Month + Council.District..Start. + Hour + Day.of.Week, data = train2)
+summary(huber)
+
+#Test with data without outliers
+rlm_predictions <- predict(huber,test)
+library(Metrics)
+print(rmse(test$Trip.Duration, rlm_predictions))
+```
+
+# RMSE without outliers
+
+```{r 12, echo=TRUE}
+transformed_predictions <- predict(transformed_model_without_outliers,test)
+library(Metrics)
+print(rmse(test$Trip.Duration, transformed_predictions))
+
+baseline_model <- lm(Trip.Duration ~ Trip.Distance + Vehicle.Type  + Month + Council.District..Start. + Hour + Day.of.Week, data=train)
+baseline_predictions <- predict(baseline_model,test)
+library(Metrics)
+print(rmse(test$Trip.Duration, baseline_predictions))
+
+#Apply exp
+predicted_duration_transformed_exp <- exp(transformed_predictions)
+print(rmse(test$Trip.Duration, predicted_duration_transformed_exp))
+predicted_duration_rlm_exp <- exp(rlm_predictions)
+print(rmse(test$Trip.Duration, predicted_duration_rlm_exp))
+```
+```{r 13, echo=FALSE}
+qqnorm(residuals(baseline_model), ylab = "Residuals")
+qqline(residuals(baseline_model))
+```
